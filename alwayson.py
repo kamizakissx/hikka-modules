@@ -1,51 +1,59 @@
-# meta developer: @yourusername
-# meta banner: https://raw.githubusercontent.com/hikariatama/hikka-plugins/master/assets/alwayson.jpg
-
-from telethon.tl.functions.account import UpdateStatusRequest
-from telethon.tl.functions.contacts import GetContactsRequest
 from .. import loader, utils
-import asyncio
+from telethon import events
+import datetime
 
 @loader.tds
-class AlwaysOnlineMod(loader.Module):
-    """Всегда в онлайне"""
-
-    strings = {
-        "name": "AlwaysOnline",
-        "enabled": "✅ Модуль включён: ты теперь всегда онлайн!",
-        "disabled": "❌ Модуль выключен: ты теперь офлайн.",
-    }
-
-    def __init__(self):
-        self._task = None
-        self.config = loader.ModuleConfig(
-            loader.ConfigValue(
-                "enabled", False, lambda: "Включить автоподдержку онлайн-статуса"
-            )
-        )
+class UsernameLoggerMod(loader.Module):
+    """Логирует изменения username и имени пользователей"""
+    strings = {"name": "NameLogger"}
 
     async def client_ready(self, client, db):
-        if self.config["enabled"]:
-            self._task = asyncio.create_task(self.always_online_loop(client))
+        self.db = db
+        self.client = client
+        if not self.db.get("namelogger", "history"):
+            self.db.set("namelogger", "history", {})
 
-    async def always_online_loop(self, client):
-        while True:
-            try:
-                await client(UpdateStatusRequest(offline=False))
-                await client(GetContactsRequest(0))  # для активности
-            except Exception:
-                pass
-            await asyncio.sleep(60)  # раз в минуту
+        client.add_event_handler(self.track_usernames, events.NewMessage)
+
+    async def track_usernames(self, event):
+        user = await event.get_sender()
+        if not user or not user.username:
+            return
+        
+        uid = str(user.id)
+        history = self.db.get("namelogger", "history")
+        if uid not in history:
+            history[uid] = []
+
+        current_data = {"username": user.username, "name": user.first_name, "time": datetime.datetime.now().isoformat()}
+
+        if not history[uid] or history[uid][-1]["username"] != user.username or history[uid][-1]["name"] != user.first_name:
+            history[uid].append(current_data)
+            self.db.set("namelogger", "history", history)
 
     @loader.command()
-    async def alwayson(self, message):
-        """Включает или выключает постоянный онлайн"""
-        if self._task:
-            self._task.cancel()
-            self._task = None
-            self.config["enabled"] = False
-            await message.edit(self.strings("disabled"))
+    async def namelog(self, message):
+        """Показать историю ников и username: .namelog @user"""
+        args = utils.get_args_raw(message)
+        reply = await message.get_reply_message()
+
+        if args:
+            user = await self.client.get_entity(args)
+        elif reply:
+            user = await reply.get_sender()
         else:
-            self._task = asyncio.create_task(self.always_online_loop(message.client))
-            self.config["enabled"] = True
-            await message.edit(self.strings("enabled"))
+            user = await message.get_sender()
+
+        uid = str(user.id)
+        history = self.db.get("namelogger", "history", {}).get(uid)
+
+        if not history:
+            await message.edit("История не найдена.")
+            return
+
+        out = f"🧾 История имени @{user.username or 'нет username'}:\n\n"
+        for item in history:
+            time = item["time"].split("T")[0]
+            out += f"📅 {time}: {item['name']} — @{item['username']}\n"
+
+        await message.edit(out)
